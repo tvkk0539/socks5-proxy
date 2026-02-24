@@ -242,17 +242,10 @@ install_dante() {
     print_message "Detected primary interface: $DETECTED_IF (IP: ${DETECTED_IP:-unknown})"
 
     # Determine internal interface configuration
-    # Dante often fails with "0.0.0.0", so we bind to the detected interface (or IP) and localhost explicitly
     INTERNAL_CONFIG=""
     if [[ "$INTERFACE" == "0.0.0.0" ]]; then
-        if [[ -n "$DETECTED_IP" ]]; then
-             INTERNAL_CONFIG="internal: $DETECTED_IP port = $PROXY_PORT"
-        else
-             INTERNAL_CONFIG="internal: $DETECTED_IF port = $PROXY_PORT"
-        fi
-        # Add localhost for local testing/management
-        INTERNAL_CONFIG="$INTERNAL_CONFIG
-internal: 127.0.0.1 port = $PROXY_PORT"
+        # Bind to all interfaces (robust against IP changes)
+        INTERNAL_CONFIG="internal: 0.0.0.0 port = $PROXY_PORT"
     else
         # Use user-provided interface or IP
         INTERNAL_CONFIG="internal: $INTERFACE port = $PROXY_PORT"
@@ -452,26 +445,60 @@ EOF
 configure_firewall() {
     print_message "Configuring firewall..."
     
-    # Check if ufw is installed (Ubuntu/Debian)
-    if command -v ufw &> /dev/null; then
+    # Check if ufw is installed and active
+    if command -v ufw &> /dev/null && ufw status | grep -q "Status: active"; then
         ufw allow $PROXY_PORT/tcp
         ufw allow $PROXY_PORT/udp
         print_message "UFW rules added"
-    fi
     
-    # Check if firewalld is installed (CentOS/RHEL)
-    if command -v firewall-cmd &> /dev/null; then
+    # Check if firewalld is installed and running
+    elif command -v firewall-cmd &> /dev/null && systemctl is-active --quiet firewalld; then
         firewall-cmd --permanent --add-port=$PROXY_PORT/tcp
         firewall-cmd --permanent --add-port=$PROXY_PORT/udp
         firewall-cmd --reload
         print_message "Firewalld rules added"
-    fi
     
-    # Check if iptables is available as fallback
-    if command -v iptables &> /dev/null; then
-        iptables -I INPUT -p tcp --dport $PROXY_PORT -j ACCEPT
-        iptables -I INPUT -p udp --dport $PROXY_PORT -j ACCEPT
+    # Fallback to iptables with persistence
+    elif command -v iptables &> /dev/null; then
+        # Check if rules already exist to avoid duplicates
+        iptables -C INPUT -p tcp --dport $PROXY_PORT -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport $PROXY_PORT -j ACCEPT
+        iptables -C INPUT -p udp --dport $PROXY_PORT -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport $PROXY_PORT -j ACCEPT
         print_message "iptables rules added"
+
+        # Persistence
+        if [[ $OS == "ubuntu" || $OS == "debian" ]]; then
+            # Install iptables-persistent non-interactively if not present
+            if ! dpkg -l | grep -q iptables-persistent; then
+                print_message "Installing iptables-persistent for rule persistence..."
+                # Try to install debconf-utils if missing, quietly
+                command -v debconf-set-selections &>/dev/null || apt-get install -y debconf-utils
+
+                echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
+                echo iptables-persistent iptables-persistent/autosave_v6 boolean true | debconf-set-selections
+                DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent
+            fi
+            # Save rules
+            if command -v netfilter-persistent &>/dev/null; then
+                netfilter-persistent save
+                print_message "iptables rules saved (netfilter-persistent)"
+            fi
+
+        elif [[ $OS == "centos" || $OS == "rhel" || $OS == "rocky" || $OS == "almalinux" ]]; then
+             # Ensure iptables-services is installed
+             if ! rpm -q iptables-services &>/dev/null; then
+                 if [[ $OS == "centos" && ${VERSION%%.*} -eq 7 ]]; then
+                    yum install -y iptables-services
+                 else
+                    dnf install -y iptables-services
+                 fi
+             fi
+             systemctl enable iptables
+             # Save rules
+             service iptables save 2>/dev/null || iptables-save > /etc/sysconfig/iptables
+             print_message "iptables rules saved"
+        fi
+    else
+         print_warning "No firewall manager found. Please ensure port $PROXY_PORT is open manually."
     fi
 }
 
