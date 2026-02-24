@@ -196,7 +196,7 @@ logoutput: $LOG_FILE
 
 # The server will bind to this address/port
 internal: $INTERFACE port = $PROXY_PORT
-external: $(ip route get 1 | awk '{print $NF;exit}')
+external: $(ip route get 1 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}')
 
 # Authentication methods
 method: $METHOD
@@ -277,7 +277,7 @@ daemon
 maxconn 1000
 nscache 65536
 timeouts 1 5 30 60 180 1800 15 60
-external $(ip route get 1 | awk '{print $NF;exit}')
+external $(ip route get 1 | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')
 internal $INTERFACE
 
 # Logging
@@ -286,7 +286,7 @@ logformat "- +_L%t.%.  %N.%p %E %U %C:%c %R:%r %O %I %h %T"
 rotate 30
 
 # SOCKS5 proxy
-socks -p$PROXY_PORT -i$INTERFACE -e$(ip route get 1 | awk '{print $NF;exit}')
+socks -p$PROXY_PORT -i$INTERFACE -e$(ip route get 1 | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')
 EOF
 
     # Add authentication if needed
