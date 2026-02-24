@@ -169,12 +169,18 @@ get_user_input() {
 verify_dante_config() {
     print_message "Verifying Dante configuration..."
     if command -v danted &>/dev/null; then
-        if danted -V -f /etc/danted.conf; then
+        local output
+        output=$(danted -V -f /etc/danted.conf 2>&1)
+        if [ $? -eq 0 ]; then
             print_message "Configuration is valid."
             return 0
         else
             print_error "Configuration verification failed!"
-            print_error "Please check the error message above."
+            echo "Dante validation output:"
+            echo "$output"
+            echo "--- Configuration File Content ---"
+            cat /etc/danted.conf
+            echo "---------------------------------"
             return 1
         fi
     else
@@ -211,21 +217,29 @@ install_dante() {
         chown nobody $LOG_FILE
     fi
 
+    # Detect the primary network interface
+    DETECTED_IF=$(ip route get 1 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}')
+
+    if [[ -z "$DETECTED_IF" ]]; then
+        # Try fallback detection methods if ip route get 1 fails to return interface
+        DETECTED_IF=$(ip route show default | awk '/default/ {print $5}')
+    fi
+
+    if [[ -z "$DETECTED_IF" ]]; then
+        print_error "Could not detect primary network interface. Cannot configure Dante automatically."
+        exit 1
+    fi
+
+    print_message "Detected primary interface: $DETECTED_IF"
+
     # Determine internal interface configuration
     # Dante often fails with "0.0.0.0", so we bind to the detected interface and localhost explicitly
     INTERNAL_CONFIG=""
     if [[ "$INTERFACE" == "0.0.0.0" ]]; then
-        # Detect the primary network interface
-        DETECTED_IF=$(ip route get 1 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}')
-        if [[ -n "$DETECTED_IF" ]]; then
-            INTERNAL_CONFIG="internal: $DETECTED_IF port = $PROXY_PORT"
-            # Add localhost for local testing/management
-            INTERNAL_CONFIG="$INTERNAL_CONFIG
+        INTERNAL_CONFIG="internal: $DETECTED_IF port = $PROXY_PORT"
+        # Add localhost for local testing/management
+        INTERNAL_CONFIG="$INTERNAL_CONFIG
 internal: 127.0.0.1 port = $PROXY_PORT"
-        else
-            # Fallback if detection fails (unlikely)
-            INTERNAL_CONFIG="internal: 0.0.0.0 port = $PROXY_PORT"
-        fi
     else
         # Use user-provided interface or IP
         INTERNAL_CONFIG="internal: $INTERFACE port = $PROXY_PORT"
@@ -240,7 +254,7 @@ logoutput: $LOG_FILE
 
 # The server will bind to this address/port
 $INTERNAL_CONFIG
-external: $(ip route get 1 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}')
+external: $DETECTED_IF
 
 # Authentication methods
 method: $METHOD
