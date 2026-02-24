@@ -2,7 +2,7 @@
 
 # SOCKS5 Proxy Auto-Installer
 # Supports: Dante, 3proxy, and microsocks
-# Tested on: Ubuntu 20.04/22.04, Debian 10/11, CentOS 7/8, Rocky Linux 8/9
+# Tested on: Ubuntu 20.04/22.04, Debian 10/11/12, CentOS 7/8, Rocky Linux 8/9
 
 set -e
 
@@ -64,15 +64,15 @@ install_dependencies() {
     case $OS in
         ubuntu|debian)
             apt-get update
-            apt-get install -y wget curl build-essential gcc make
+            apt-get install -y wget curl build-essential gcc make iproute2
             ;;
         centos|rhel|rocky|almalinux)
             if [[ $OS == "centos" && ${VERSION%%.*} -eq 7 ]]; then
                 yum install -y epel-release
-                yum install -y wget curl gcc make
+                yum install -y wget curl gcc make iproute
             else
                 dnf install -y epel-release
-                dnf install -y wget curl gcc make
+                dnf install -y wget curl gcc make iproute
             fi
             ;;
         *)
@@ -165,6 +165,24 @@ get_user_input() {
     fi
 }
 
+# Function to verify Dante config
+verify_dante_config() {
+    print_message "Verifying Dante configuration..."
+    if command -v danted &>/dev/null; then
+        if danted -V -f /etc/danted.conf; then
+            print_message "Configuration is valid."
+            return 0
+        else
+            print_error "Configuration verification failed!"
+            print_error "Please check the error message above."
+            return 1
+        fi
+    else
+        print_warning "danted command not found, skipping verification."
+        return 0
+    fi
+}
+
 # Function to install and configure Dante
 install_dante() {
     print_message "Installing Dante SOCKS5 server..."
@@ -187,6 +205,32 @@ install_dante() {
         cp /etc/danted.conf /etc/danted.conf.backup
     fi
     
+    # Ensure log file exists and is writable by nobody
+    touch $LOG_FILE
+    if id "nobody" &>/dev/null; then
+        chown nobody $LOG_FILE
+    fi
+
+    # Determine internal interface configuration
+    # Dante often fails with "0.0.0.0", so we bind to the detected interface and localhost explicitly
+    INTERNAL_CONFIG=""
+    if [[ "$INTERFACE" == "0.0.0.0" ]]; then
+        # Detect the primary network interface
+        DETECTED_IF=$(ip route get 1 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}')
+        if [[ -n "$DETECTED_IF" ]]; then
+            INTERNAL_CONFIG="internal: $DETECTED_IF port = $PROXY_PORT"
+            # Add localhost for local testing/management
+            INTERNAL_CONFIG="$INTERNAL_CONFIG
+internal: 127.0.0.1 port = $PROXY_PORT"
+        else
+            # Fallback if detection fails (unlikely)
+            INTERNAL_CONFIG="internal: 0.0.0.0 port = $PROXY_PORT"
+        fi
+    else
+        # Use user-provided interface or IP
+        INTERNAL_CONFIG="internal: $INTERFACE port = $PROXY_PORT"
+    fi
+
     # Create Dante configuration
     cat > /etc/danted.conf <<EOF
 # Dante SOCKS5 Server Configuration
@@ -195,7 +239,7 @@ install_dante() {
 logoutput: $LOG_FILE
 
 # The server will bind to this address/port
-internal: $INTERFACE port = $PROXY_PORT
+$INTERNAL_CONFIG
 external: $(ip route get 1 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}')
 
 # Authentication methods
@@ -245,6 +289,12 @@ socks pass {
 EOF
     fi
     
+    # Verify configuration before restarting
+    if ! verify_dante_config; then
+        print_error "Aborting installation due to configuration error."
+        exit 1
+    fi
+
     # Start and enable Dante
     systemctl restart danted
     systemctl enable danted
@@ -403,7 +453,7 @@ test_proxy() {
     print_message "Testing SOCKS5 proxy..."
     
     # Wait for service to start
-    sleep 5
+    sleep 10
     
     # Test local connection
     if command -v curl &> /dev/null; then
@@ -417,6 +467,12 @@ test_proxy() {
             print_message "Proxy test successful!"
         else
             print_warning "Proxy test failed. Please check configuration."
+            if [[ $SERVER_TYPE == "dante" ]]; then
+                print_warning "Dante Service Status:"
+                systemctl status danted --no-pager || true
+                print_warning "Dante Logs (last 20 lines):"
+                tail -n 20 $LOG_FILE 2>/dev/null || echo "Log file not found."
+            fi
         fi
     else
         print_warning "curl not installed, skipping proxy test"
