@@ -18,7 +18,7 @@ PROXY_USER=""
 PROXY_PASSWORD=""
 INTERFACE="0.0.0.0"
 DNS_SERVERS="8.8.8.8,8.8.4.4"
-METHOD="password"  # password or none
+METHOD="username"  # username (password auth) or none
 SERVER_TYPE="dante"  # dante, 3proxy, microsocks
 LOG_FILE="/var/log/danted.log"
 
@@ -124,7 +124,7 @@ get_user_input() {
         METHOD="none"
         print_warning "You selected no authentication. This will create an open proxy!"
     else
-        METHOD="password"
+        METHOD="username"
         read -p "Enter username (default: proxyuser): " PROXY_USER
         if [[ -z "$PROXY_USER" ]]; then
             PROXY_USER="proxyuser"
@@ -151,7 +151,7 @@ get_user_input() {
     echo "  Server Type: $SERVER_TYPE"
     echo "  Port: $PROXY_PORT"
     echo "  Auth Method: $METHOD"
-    if [[ $METHOD == "password" ]]; then
+    if [[ $METHOD == "username" ]]; then
         echo "  Username: $PROXY_USER"
         echo "  Password: $PROXY_PASSWORD"
     fi
@@ -284,7 +284,7 @@ client pass {
 EOF
 
     # Add authentication rules
-    if [[ $METHOD == "password" ]]; then
+    if [[ $METHOD == "username" ]]; then
         cat >> /etc/danted.conf <<EOF
 
 # SOCKS methods
@@ -367,7 +367,7 @@ socks -p$PROXY_PORT -i$INTERFACE -e$(ip route get 1 | awk '{for(i=1;i<=NF;i++) i
 EOF
 
     # Add authentication if needed
-    if [[ $METHOD == "password" ]]; then
+    if [[ $METHOD == "username" ]]; then
         # Create users file
         cat > /etc/3proxy/passwd <<EOF
 $PROXY_USER:CL:$PROXY_PASSWORD
@@ -484,7 +484,7 @@ test_proxy() {
     
     # Test local connection
     if command -v curl &> /dev/null; then
-        if [[ $METHOD == "password" ]]; then
+        if [[ $METHOD == "username" ]]; then
             curl --socks5 $PROXY_USER:$PROXY_PASSWORD@localhost:$PROXY_PORT https://api.ipify.org
         else
             curl --socks5 localhost:$PROXY_PORT https://api.ipify.org
@@ -520,21 +520,21 @@ display_info() {
     echo "  Server IP: $PUBLIC_IP"
     echo "  Port: $PROXY_PORT"
     echo "  Authentication: $METHOD"
-    if [[ $METHOD == "password" ]]; then
+    if [[ $METHOD == "username" ]]; then
         echo "  Username: $PROXY_USER"
         echo "  Password: $PROXY_PASSWORD"
     fi
     echo ""
     echo "Connection String Examples:"
     echo "  Browser/Application:"
-    if [[ $METHOD == "password" ]]; then
+    if [[ $METHOD == "username" ]]; then
         echo "    socks5://$PROXY_USER:$PROXY_PASSWORD@$PUBLIC_IP:$PROXY_PORT"
     else
         echo "    socks5://$PUBLIC_IP:$PROXY_PORT"
     fi
     echo ""
     echo "  curl command:"
-    if [[ $METHOD == "password" ]]; then
+    if [[ $METHOD == "username" ]]; then
         echo "    curl --socks5 $PROXY_USER:$PROXY_PASSWORD@$PUBLIC_IP:$PROXY_PORT https://api.ipify.org"
     else
         echo "    curl --socks5 $PUBLIC_IP:$PROXY_PORT https://api.ipify.org"
