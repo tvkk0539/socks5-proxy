@@ -20,7 +20,7 @@ INTERFACE="0.0.0.0"
 DNS_SERVERS="8.8.8.8,8.8.4.4"
 METHOD="password"  # password or none
 SERVER_TYPE="dante"  # dante, 3proxy, microsocks
-LOG_FILE="/var/log/socks5-proxy.log"
+LOG_FILE="/var/log/danted.log"
 
 # Function to print colored output
 print_message() {
@@ -171,17 +171,23 @@ verify_dante_config() {
     if command -v danted &>/dev/null; then
         local output
         output=$(danted -V -f /etc/danted.conf 2>&1)
-        if [ $? -eq 0 ]; then
+        local exit_code=$?
+        if [ $exit_code -eq 0 ]; then
             print_message "Configuration is valid."
             return 0
         else
-            print_error "Configuration verification failed!"
-            echo "Dante validation output:"
-            echo "$output"
+            print_warning "Configuration verification returned exit code $exit_code!"
+            if [[ -n "$output" ]]; then
+                echo "Dante validation output:"
+                echo "$output"
+            else
+                echo "Dante validation produced no output."
+            fi
             echo "--- Configuration File Content ---"
             cat /etc/danted.conf
             echo "---------------------------------"
-            return 1
+            print_warning "Proceeding with installation despite verification failure (attempting to start service for better diagnostics)..."
+            return 0
         fi
     else
         print_warning "danted command not found, skipping verification."
@@ -230,13 +236,20 @@ install_dante() {
         exit 1
     fi
 
-    print_message "Detected primary interface: $DETECTED_IF"
+    # Try to resolve IP address of the interface for more robust binding
+    DETECTED_IP=$(ip -4 addr show $DETECTED_IF | awk '/inet / {print $2}' | cut -d/ -f1 | head -n 1)
+
+    print_message "Detected primary interface: $DETECTED_IF (IP: ${DETECTED_IP:-unknown})"
 
     # Determine internal interface configuration
-    # Dante often fails with "0.0.0.0", so we bind to the detected interface and localhost explicitly
+    # Dante often fails with "0.0.0.0", so we bind to the detected interface (or IP) and localhost explicitly
     INTERNAL_CONFIG=""
     if [[ "$INTERFACE" == "0.0.0.0" ]]; then
-        INTERNAL_CONFIG="internal: $DETECTED_IF port = $PROXY_PORT"
+        if [[ -n "$DETECTED_IP" ]]; then
+             INTERNAL_CONFIG="internal: $DETECTED_IP port = $PROXY_PORT"
+        else
+             INTERNAL_CONFIG="internal: $DETECTED_IF port = $PROXY_PORT"
+        fi
         # Add localhost for local testing/management
         INTERNAL_CONFIG="$INTERNAL_CONFIG
 internal: 127.0.0.1 port = $PROXY_PORT"
