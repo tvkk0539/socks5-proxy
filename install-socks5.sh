@@ -84,7 +84,7 @@ install_dependencies() {
 
 # Function to generate random password
 generate_password() {
-    openssl rand -base64 12
+    openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 12
 }
 
 # Function to get user input
@@ -130,6 +130,12 @@ get_user_input() {
             PROXY_USER="proxyuser"
         fi
         
+        # Validate username (no colons allowed)
+        if [[ "$PROXY_USER" == *":"* ]]; then
+            print_error "Username cannot contain ':' (colon) character."
+            exit 1
+        fi
+
         read -s -p "Enter password (leave empty to generate random): " user_password
         echo ""
         if [[ -z "$user_password" ]]; then
@@ -137,6 +143,11 @@ get_user_input() {
             print_message "Generated password: $PROXY_PASSWORD"
         else
             PROXY_PASSWORD=$user_password
+            # Validate password (no colons allowed)
+            if [[ "$PROXY_PASSWORD" == *":"* ]]; then
+                print_error "Password cannot contain ':' (colon) character."
+                exit 1
+            fi
         fi
     fi
     
@@ -530,21 +541,35 @@ test_proxy() {
     # Test local connection
     if command -v curl &> /dev/null; then
         if [[ $METHOD == "username" ]]; then
-            curl --socks5 $PROXY_USER:$PROXY_PASSWORD@localhost:$PROXY_PORT https://api.ipify.org
+            # Quote the URL to handle special characters in password
+            curl --socks5 "$PROXY_USER:$PROXY_PASSWORD@localhost:$PROXY_PORT" https://api.ipify.org
         else
-            curl --socks5 localhost:$PROXY_PORT https://api.ipify.org
+            curl --socks5 "localhost:$PROXY_PORT" https://api.ipify.org
         fi
         
         if [ $? -eq 0 ]; then
             print_message "Proxy test successful!"
         else
             print_warning "Proxy test failed. Please check configuration."
+
+            echo "--- Debugging Information ---"
             if [[ $SERVER_TYPE == "dante" ]]; then
                 print_warning "Dante Service Status:"
                 systemctl status danted --no-pager || true
                 print_warning "Dante Logs (last 20 lines):"
                 tail -n 20 $LOG_FILE 2>/dev/null || echo "Log file not found."
+            elif [[ $SERVER_TYPE == "3proxy" ]]; then
+                print_warning "3proxy Service Status:"
+                systemctl status 3proxy --no-pager || true
+                print_warning "3proxy Logs (last 20 lines):"
+                tail -n 20 /var/log/3proxy.log 2>/dev/null || echo "Log file not found."
+            elif [[ $SERVER_TYPE == "microsocks" ]]; then
+                print_warning "microsocks Service Status:"
+                systemctl status microsocks --no-pager || true
+                print_warning "microsocks Logs (last 20 lines):"
+                journalctl -u microsocks -n 20 --no-pager || echo "Logs not found."
             fi
+            echo "-----------------------------"
         fi
     else
         print_warning "curl not installed, skipping proxy test"
