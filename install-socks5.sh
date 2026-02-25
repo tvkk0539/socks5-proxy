@@ -324,21 +324,16 @@ EOF
 install_3proxy() {
     print_message "Installing 3proxy SOCKS5 server..."
     
-    # Install 3proxy
-    case $OS in
-        ubuntu|debian)
-            apt-get install -y 3proxy
-            ;;
-        centos|rhel|rocky|almalinux)
-            # For CentOS/Rocky, compile from source
-            cd /tmp
-            wget https://github.com/3proxy/3proxy/archive/refs/tags/0.9.4.tar.gz
-            tar -xzf 0.9.4.tar.gz
-            cd 3proxy-0.9.4
-            make -f Makefile.Linux
-            make install
-            ;;
-    esac
+    # Install 3proxy (compile from source for all distros to ensure consistency)
+    cd /tmp
+    wget https://github.com/3proxy/3proxy/archive/refs/tags/0.9.4.tar.gz
+    tar -xzf 0.9.4.tar.gz
+    cd 3proxy-0.9.4
+    make -f Makefile.Linux
+    make -f Makefile.Linux install
+
+    # Create config directory
+    mkdir -p /etc/3proxy
     
     # Create 3proxy configuration
     cat > /etc/3proxy/3proxy.cfg <<EOF
@@ -347,7 +342,9 @@ daemon
 maxconn 1000
 nscache 65536
 timeouts 1 5 30 60 180 1800 15 60
-external $(ip route get 1 | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')
+# External interface (outgoing) - 0.0.0.0 means use system routing
+external 0.0.0.0
+# Internal interface (incoming)
 internal $INTERFACE
 
 # Logging
@@ -356,7 +353,7 @@ logformat "- +_L%t.%.  %N.%p %E %U %C:%c %R:%r %O %I %h %T"
 rotate 30
 
 # SOCKS5 proxy
-socks -p$PROXY_PORT -i$INTERFACE -e$(ip route get 1 | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1); exit}')
+socks -p$PROXY_PORT
 EOF
 
     # Add authentication if needed
