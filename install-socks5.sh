@@ -355,19 +355,37 @@ log /var/log/3proxy.log D
 logformat "- +_L%t.%.  %N.%p %E %U %C:%c %R:%r %O %I %h %T"
 rotate 30
 
-# SOCKS5 proxy
-socks -p$PROXY_PORT
 EOF
 
-    # Add authentication if needed
+    # Add authentication configuration
     if [[ $METHOD == "username" ]]; then
         # Create users file
         cat > /etc/3proxy/passwd <<EOF
 $PROXY_USER:CL:$PROXY_PASSWORD
 EOF
-        # Modify config to use authentication
-        sed -i "s/^socks .*/& -a -n/" /etc/3proxy/3proxy.cfg
+
+        # Add authentication config to 3proxy.cfg
+        cat >> /etc/3proxy/3proxy.cfg <<EOF
+# User authentication
+users $/etc/3proxy/passwd
+auth strong
+allow *
+EOF
+    else
+        # No authentication
+        cat >> /etc/3proxy/3proxy.cfg <<EOF
+# No authentication
+auth none
+allow *
+EOF
     fi
+
+    # Add SOCKS service definition
+    cat >> /etc/3proxy/3proxy.cfg <<EOF
+
+# SOCKS5 proxy
+socks -p$PROXY_PORT
+EOF
     
     # Create systemd service
     cat > /etc/systemd/system/3proxy.service <<EOF
