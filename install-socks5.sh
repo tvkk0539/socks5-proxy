@@ -330,7 +330,9 @@ install_3proxy() {
     tar -xzf 0.9.4.tar.gz
     cd 3proxy-0.9.4
     make -f Makefile.Linux
-    make -f Makefile.Linux install
+    # Install with prefix=/usr/local to ensure binaries go to /usr/local/bin
+    # Set DESTDIR=/ to skip built-in postinst scripts that may fail or conflict
+    make -f Makefile.Linux install prefix=/usr/local DESTDIR=/
 
     # Create config directory
     mkdir -p /etc/3proxy
@@ -339,6 +341,7 @@ install_3proxy() {
     cat > /etc/3proxy/3proxy.cfg <<EOF
 # 3proxy Configuration
 daemon
+pidfile /var/run/3proxy.pid
 maxconn 1000
 nscache 65536
 timeouts 1 5 30 60 180 1800 15 60
