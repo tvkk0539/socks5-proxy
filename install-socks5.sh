@@ -2,7 +2,7 @@
 
 # SOCKS5 Proxy Auto-Installer
 # Supports: Dante, 3proxy, and microsocks
-# Tested on: Ubuntu 20.04/22.04, Debian 10/11, CentOS 7/8, Rocky Linux 8/9
+# Tested on: Ubuntu 20.04/22.04, Debian 10/11/12, CentOS 7/8, Rocky Linux 8/9
 
 set -e
 
@@ -18,9 +18,9 @@ PROXY_USER=""
 PROXY_PASSWORD=""
 INTERFACE="0.0.0.0"
 DNS_SERVERS="8.8.8.8,8.8.4.4"
-METHOD="password"  # password or none
+METHOD="username"  # username (password auth) or none
 SERVER_TYPE="dante"  # dante, 3proxy, microsocks
-LOG_FILE="/var/log/socks5-proxy.log"
+LOG_FILE="/var/log/danted.log"
 
 # Function to print colored output
 print_message() {
@@ -64,15 +64,15 @@ install_dependencies() {
     case $OS in
         ubuntu|debian)
             apt-get update
-            apt-get install -y wget curl build-essential gcc make
+            apt-get install -y wget curl build-essential gcc make iproute2
             ;;
         centos|rhel|rocky|almalinux)
             if [[ $OS == "centos" && ${VERSION%%.*} -eq 7 ]]; then
                 yum install -y epel-release
-                yum install -y wget curl gcc make
+                yum install -y wget curl gcc make iproute
             else
                 dnf install -y epel-release
-                dnf install -y wget curl gcc make
+                dnf install -y wget curl gcc make iproute
             fi
             ;;
         *)
@@ -84,7 +84,7 @@ install_dependencies() {
 
 # Function to generate random password
 generate_password() {
-    openssl rand -base64 12
+    openssl rand -base64 16 | tr -dc 'a-zA-Z0-9' | head -c 12
 }
 
 # Function to get user input
@@ -124,12 +124,18 @@ get_user_input() {
         METHOD="none"
         print_warning "You selected no authentication. This will create an open proxy!"
     else
-        METHOD="password"
+        METHOD="username"
         read -p "Enter username (default: proxyuser): " PROXY_USER
         if [[ -z "$PROXY_USER" ]]; then
             PROXY_USER="proxyuser"
         fi
         
+        # Validate username (no colons allowed)
+        if [[ "$PROXY_USER" == *":"* ]]; then
+            print_error "Username cannot contain ':' (colon) character."
+            exit 1
+        fi
+
         read -s -p "Enter password (leave empty to generate random): " user_password
         echo ""
         if [[ -z "$user_password" ]]; then
@@ -137,6 +143,11 @@ get_user_input() {
             print_message "Generated password: $PROXY_PASSWORD"
         else
             PROXY_PASSWORD=$user_password
+            # Validate password (no colons allowed)
+            if [[ "$PROXY_PASSWORD" == *":"* ]]; then
+                print_error "Password cannot contain ':' (colon) character."
+                exit 1
+            fi
         fi
     fi
     
@@ -151,7 +162,7 @@ get_user_input() {
     echo "  Server Type: $SERVER_TYPE"
     echo "  Port: $PROXY_PORT"
     echo "  Auth Method: $METHOD"
-    if [[ $METHOD == "password" ]]; then
+    if [[ $METHOD == "username" ]]; then
         echo "  Username: $PROXY_USER"
         echo "  Password: $PROXY_PASSWORD"
     fi
@@ -162,6 +173,36 @@ get_user_input() {
     if [[ $confirm != "y" && $confirm != "Y" ]]; then
         print_message "Installation cancelled"
         exit 0
+    fi
+}
+
+# Function to verify Dante config
+verify_dante_config() {
+    print_message "Verifying Dante configuration..."
+    if command -v danted &>/dev/null; then
+        local output
+        output=$(danted -V -f /etc/danted.conf 2>&1)
+        local exit_code=$?
+        if [ $exit_code -eq 0 ]; then
+            print_message "Configuration is valid."
+            return 0
+        else
+            print_warning "Configuration verification returned exit code $exit_code!"
+            if [[ -n "$output" ]]; then
+                echo "Dante validation output:"
+                echo "$output"
+            else
+                echo "Dante validation produced no output."
+            fi
+            echo "--- Configuration File Content ---"
+            cat /etc/danted.conf
+            echo "---------------------------------"
+            print_warning "Proceeding with installation despite verification failure (attempting to start service for better diagnostics)..."
+            return 0
+        fi
+    else
+        print_warning "danted command not found, skipping verification."
+        return 0
     fi
 }
 
@@ -187,6 +228,40 @@ install_dante() {
         cp /etc/danted.conf /etc/danted.conf.backup
     fi
     
+    # Ensure log file exists and is writable by nobody
+    touch $LOG_FILE
+    if id "nobody" &>/dev/null; then
+        chown nobody $LOG_FILE
+    fi
+
+    # Detect the primary network interface
+    DETECTED_IF=$(ip route get 1 | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}')
+
+    if [[ -z "$DETECTED_IF" ]]; then
+        # Try fallback detection methods if ip route get 1 fails to return interface
+        DETECTED_IF=$(ip route show default | awk '/default/ {print $5}')
+    fi
+
+    if [[ -z "$DETECTED_IF" ]]; then
+        print_error "Could not detect primary network interface. Cannot configure Dante automatically."
+        exit 1
+    fi
+
+    # Try to resolve IP address of the interface for more robust binding
+    DETECTED_IP=$(ip -4 addr show $DETECTED_IF | awk '/inet / {print $2}' | cut -d/ -f1 | head -n 1)
+
+    print_message "Detected primary interface: $DETECTED_IF (IP: ${DETECTED_IP:-unknown})"
+
+    # Determine internal interface configuration
+    INTERNAL_CONFIG=""
+    if [[ "$INTERFACE" == "0.0.0.0" ]]; then
+        # Bind to all interfaces (robust against IP changes)
+        INTERNAL_CONFIG="internal: 0.0.0.0 port = $PROXY_PORT"
+    else
+        # Use user-provided interface or IP
+        INTERNAL_CONFIG="internal: $INTERFACE port = $PROXY_PORT"
+    fi
+
     # Create Dante configuration
     cat > /etc/danted.conf <<EOF
 # Dante SOCKS5 Server Configuration
@@ -195,8 +270,8 @@ install_dante() {
 logoutput: $LOG_FILE
 
 # The server will bind to this address/port
-internal: $INTERFACE port = $PROXY_PORT
-external: $(ip route get 1 | awk '{print $NF;exit}')
+$INTERNAL_CONFIG
+external: $DETECTED_IF
 
 # Authentication methods
 method: $METHOD
@@ -213,7 +288,7 @@ client pass {
 EOF
 
     # Add authentication rules
-    if [[ $METHOD == "password" ]]; then
+    if [[ $METHOD == "username" ]]; then
         cat >> /etc/danted.conf <<EOF
 
 # SOCKS methods
@@ -245,6 +320,12 @@ socks pass {
 EOF
     fi
     
+    # Verify configuration before restarting
+    if ! verify_dante_config; then
+        print_error "Aborting installation due to configuration error."
+        exit 1
+    fi
+
     # Start and enable Dante
     systemctl restart danted
     systemctl enable danted
@@ -254,30 +335,30 @@ EOF
 install_3proxy() {
     print_message "Installing 3proxy SOCKS5 server..."
     
-    # Install 3proxy
-    case $OS in
-        ubuntu|debian)
-            apt-get install -y 3proxy
-            ;;
-        centos|rhel|rocky|almalinux)
-            # For CentOS/Rocky, compile from source
-            cd /tmp
-            wget https://github.com/3proxy/3proxy/archive/refs/tags/0.9.4.tar.gz
-            tar -xzf 0.9.4.tar.gz
-            cd 3proxy-0.9.4
-            make -f Makefile.Linux
-            make install
-            ;;
-    esac
+    # Install 3proxy (compile from source for all distros to ensure consistency)
+    cd /tmp
+    wget https://github.com/3proxy/3proxy/archive/refs/tags/0.9.4.tar.gz
+    tar -xzf 0.9.4.tar.gz
+    cd 3proxy-0.9.4
+    make -f Makefile.Linux
+    # Install with prefix=/usr/local to ensure binaries go to /usr/local/bin
+    # Set DESTDIR=/ to skip built-in postinst scripts that may fail or conflict
+    make -f Makefile.Linux install prefix=/usr/local DESTDIR=/
+
+    # Create config directory
+    mkdir -p /etc/3proxy
     
     # Create 3proxy configuration
     cat > /etc/3proxy/3proxy.cfg <<EOF
 # 3proxy Configuration
 daemon
+pidfile /var/run/3proxy.pid
 maxconn 1000
 nscache 65536
 timeouts 1 5 30 60 180 1800 15 60
-external $(ip route get 1 | awk '{print $NF;exit}')
+# External interface (outgoing) - 0.0.0.0 means use system routing
+external 0.0.0.0
+# Internal interface (incoming)
 internal $INTERFACE
 
 # Logging
@@ -285,19 +366,37 @@ log /var/log/3proxy.log D
 logformat "- +_L%t.%.  %N.%p %E %U %C:%c %R:%r %O %I %h %T"
 rotate 30
 
-# SOCKS5 proxy
-socks -p$PROXY_PORT -i$INTERFACE -e$(ip route get 1 | awk '{print $NF;exit}')
 EOF
 
-    # Add authentication if needed
-    if [[ $METHOD == "password" ]]; then
+    # Add authentication configuration
+    if [[ $METHOD == "username" ]]; then
         # Create users file
         cat > /etc/3proxy/passwd <<EOF
 $PROXY_USER:CL:$PROXY_PASSWORD
 EOF
-        # Modify config to use authentication
-        sed -i "s/^socks .*/& -a -n/" /etc/3proxy/3proxy.cfg
+
+        # Add authentication config to 3proxy.cfg
+        cat >> /etc/3proxy/3proxy.cfg <<EOF
+# User authentication
+users $/etc/3proxy/passwd
+auth strong
+allow *
+EOF
+    else
+        # No authentication
+        cat >> /etc/3proxy/3proxy.cfg <<EOF
+# No authentication
+auth none
+allow *
+EOF
     fi
+
+    # Add SOCKS service definition
+    cat >> /etc/3proxy/3proxy.cfg <<EOF
+
+# SOCKS5 proxy
+socks -p$PROXY_PORT
+EOF
     
     # Create systemd service
     cat > /etc/systemd/system/3proxy.service <<EOF
@@ -375,26 +474,60 @@ EOF
 configure_firewall() {
     print_message "Configuring firewall..."
     
-    # Check if ufw is installed (Ubuntu/Debian)
-    if command -v ufw &> /dev/null; then
+    # Check if ufw is installed and active
+    if command -v ufw &> /dev/null && ufw status | grep -q "Status: active"; then
         ufw allow $PROXY_PORT/tcp
         ufw allow $PROXY_PORT/udp
         print_message "UFW rules added"
-    fi
     
-    # Check if firewalld is installed (CentOS/RHEL)
-    if command -v firewall-cmd &> /dev/null; then
+    # Check if firewalld is installed and running
+    elif command -v firewall-cmd &> /dev/null && systemctl is-active --quiet firewalld; then
         firewall-cmd --permanent --add-port=$PROXY_PORT/tcp
         firewall-cmd --permanent --add-port=$PROXY_PORT/udp
         firewall-cmd --reload
         print_message "Firewalld rules added"
-    fi
     
-    # Check if iptables is available as fallback
-    if command -v iptables &> /dev/null; then
-        iptables -I INPUT -p tcp --dport $PROXY_PORT -j ACCEPT
-        iptables -I INPUT -p udp --dport $PROXY_PORT -j ACCEPT
+    # Fallback to iptables with persistence
+    elif command -v iptables &> /dev/null; then
+        # Check if rules already exist to avoid duplicates
+        iptables -C INPUT -p tcp --dport $PROXY_PORT -j ACCEPT 2>/dev/null || iptables -I INPUT -p tcp --dport $PROXY_PORT -j ACCEPT
+        iptables -C INPUT -p udp --dport $PROXY_PORT -j ACCEPT 2>/dev/null || iptables -I INPUT -p udp --dport $PROXY_PORT -j ACCEPT
         print_message "iptables rules added"
+
+        # Persistence
+        if [[ $OS == "ubuntu" || $OS == "debian" ]]; then
+            # Install iptables-persistent non-interactively if not present
+            if ! dpkg -l | grep -q iptables-persistent; then
+                print_message "Installing iptables-persistent for rule persistence..."
+                # Try to install debconf-utils if missing, quietly
+                command -v debconf-set-selections &>/dev/null || apt-get install -y debconf-utils
+
+                echo iptables-persistent iptables-persistent/autosave_v4 boolean true | debconf-set-selections
+                echo iptables-persistent iptables-persistent/autosave_v6 boolean true | debconf-set-selections
+                DEBIAN_FRONTEND=noninteractive apt-get install -y iptables-persistent
+            fi
+            # Save rules
+            if command -v netfilter-persistent &>/dev/null; then
+                netfilter-persistent save
+                print_message "iptables rules saved (netfilter-persistent)"
+            fi
+
+        elif [[ $OS == "centos" || $OS == "rhel" || $OS == "rocky" || $OS == "almalinux" ]]; then
+             # Ensure iptables-services is installed
+             if ! rpm -q iptables-services &>/dev/null; then
+                 if [[ $OS == "centos" && ${VERSION%%.*} -eq 7 ]]; then
+                    yum install -y iptables-services
+                 else
+                    dnf install -y iptables-services
+                 fi
+             fi
+             systemctl enable iptables
+             # Save rules
+             service iptables save 2>/dev/null || iptables-save > /etc/sysconfig/iptables
+             print_message "iptables rules saved"
+        fi
+    else
+         print_warning "No firewall manager found. Please ensure port $PROXY_PORT is open manually."
     fi
 }
 
@@ -403,20 +536,40 @@ test_proxy() {
     print_message "Testing SOCKS5 proxy..."
     
     # Wait for service to start
-    sleep 5
+    sleep 10
     
     # Test local connection
     if command -v curl &> /dev/null; then
-        if [[ $METHOD == "password" ]]; then
-            curl --socks5 $PROXY_USER:$PROXY_PASSWORD@localhost:$PROXY_PORT https://api.ipify.org
+        if [[ $METHOD == "username" ]]; then
+            # Quote the URL to handle special characters in password
+            curl --socks5 "$PROXY_USER:$PROXY_PASSWORD@localhost:$PROXY_PORT" https://api.ipify.org
         else
-            curl --socks5 localhost:$PROXY_PORT https://api.ipify.org
+            curl --socks5 "localhost:$PROXY_PORT" https://api.ipify.org
         fi
         
         if [ $? -eq 0 ]; then
             print_message "Proxy test successful!"
         else
             print_warning "Proxy test failed. Please check configuration."
+
+            echo "--- Debugging Information ---"
+            if [[ $SERVER_TYPE == "dante" ]]; then
+                print_warning "Dante Service Status:"
+                systemctl status danted --no-pager || true
+                print_warning "Dante Logs (last 20 lines):"
+                tail -n 20 $LOG_FILE 2>/dev/null || echo "Log file not found."
+            elif [[ $SERVER_TYPE == "3proxy" ]]; then
+                print_warning "3proxy Service Status:"
+                systemctl status 3proxy --no-pager || true
+                print_warning "3proxy Logs (last 20 lines):"
+                tail -n 20 /var/log/3proxy.log 2>/dev/null || echo "Log file not found."
+            elif [[ $SERVER_TYPE == "microsocks" ]]; then
+                print_warning "microsocks Service Status:"
+                systemctl status microsocks --no-pager || true
+                print_warning "microsocks Logs (last 20 lines):"
+                journalctl -u microsocks -n 20 --no-pager || echo "Logs not found."
+            fi
+            echo "-----------------------------"
         fi
     else
         print_warning "curl not installed, skipping proxy test"
@@ -437,21 +590,21 @@ display_info() {
     echo "  Server IP: $PUBLIC_IP"
     echo "  Port: $PROXY_PORT"
     echo "  Authentication: $METHOD"
-    if [[ $METHOD == "password" ]]; then
+    if [[ $METHOD == "username" ]]; then
         echo "  Username: $PROXY_USER"
         echo "  Password: $PROXY_PASSWORD"
     fi
     echo ""
     echo "Connection String Examples:"
     echo "  Browser/Application:"
-    if [[ $METHOD == "password" ]]; then
+    if [[ $METHOD == "username" ]]; then
         echo "    socks5://$PROXY_USER:$PROXY_PASSWORD@$PUBLIC_IP:$PROXY_PORT"
     else
         echo "    socks5://$PUBLIC_IP:$PROXY_PORT"
     fi
     echo ""
     echo "  curl command:"
-    if [[ $METHOD == "password" ]]; then
+    if [[ $METHOD == "username" ]]; then
         echo "    curl --socks5 $PROXY_USER:$PROXY_PASSWORD@$PUBLIC_IP:$PROXY_PORT https://api.ipify.org"
     else
         echo "    curl --socks5 $PUBLIC_IP:$PROXY_PORT https://api.ipify.org"
